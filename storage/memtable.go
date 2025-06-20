@@ -53,11 +53,12 @@ func New() *Memtable {
 	}
 }
 
-func (m *Memtable) Set(key string, value string) {
+func (m *Memtable) Set(key string, value string, deleted bool) {
 	m.Store.Set(MemtableEntry{
 		Key:       key,
 		Value:     value,
 		Timestamp: time.Now(),
+		Deleted:   deleted,
 	})
 }
 
@@ -80,8 +81,10 @@ func (m *Memtable) Get(key string) (MemtableEntry, error) {
 }
 
 func (m *Memtable) Delete(key string) {
-	m.Store.Delete(MemtableEntry{
-		Key: key,
+	m.Store.Set(MemtableEntry{
+		Key:       key,
+		Timestamp: time.Now(),
+		Deleted:   true,
 	})
 }
 

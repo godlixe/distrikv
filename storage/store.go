@@ -1,7 +1,5 @@
 package storage
 
-import "fmt"
-
 // Store is expected to be
 // a layer of abstraction to the core storage.
 // The core storage will implement LSM, and should be
@@ -19,10 +17,7 @@ func (s *Store) Get(key string) (*KVData, error) {
 }
 
 func (s *Store) Delete(key string) {
-	err := s.Backend.Flush()
-	if err != nil {
-		fmt.Println(err)
-	}
+	s.Backend.Delete(key)
 }
 
 func NewStore() Store {

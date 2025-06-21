@@ -63,11 +63,11 @@ func Flush(memtable *Memtable) error {
 	// will flush as level 0, other levels
 	// are handled by compaction.
 	sstFullName := fmt.Sprintf("%s_%s.%s", "0", filename, SSTFileFormat)
-	err := updateManifestFile(FLUSH, BEGIN, sstFullName)
+	// err := updateManifestFile(FLUSH, BEGIN, sstFullName)
 
-	if err != nil {
-		return err
-	}
+	// if err != nil {
+	// 	return err
+	// }
 
 	f, err := os.OpenFile(
 		path.Join(baseDir, sstFullName),
@@ -94,10 +94,10 @@ func Flush(memtable *Memtable) error {
 		return err
 	}
 
-	err = updateManifestFile(FLUSH, DONE, sstFullName)
-	if err != nil {
-		return err
-	}
+	// err = updateManifestFile(FLUSH, DONE, sstFullName)
+	// if err != nil {
+	// 	return err
+	// }
 
 	return nil
 }

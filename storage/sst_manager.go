@@ -3,90 +3,212 @@ package storage
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
-	"path"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
 var SSTMANIFESTFileName = "MANIFEST"
 
-type SSTAction string
+type SSTState int
 
 const (
-	FLUSH      SSTAction = "FLUSH"
-	COMPACTION SSTAction = "COMPACTION"
+	// initial sst state
+	FLUSHING SSTState = iota
+
+	// in this state, the sst is ready to be compacted
+	FLUSHED
+
+	// state of a compacting sst
+	COMPACTING
+
+	// in this state, the sst is ready to be deleted
+	COMPACTED
 )
 
-type SSTState string
-
-const (
-	BEGIN SSTState = "BEGIN"
-	DONE  SSTState = "DONE"
-)
+// SST File Format
+// [KeyLength][Key][ValLength][Val]
+// ...
+// ...
+// <Metadata>
+// level [level]
+// timestamp [creation timestamp]
+// <sst_done> (just a marker for marking that a sst is done made)
 
 type SST struct {
-	FileName string
-	Level    int
+	FileName  string
+	Level     int
+	Timestamp time.Time
+	Status    SSTState
 }
 
 // SSTManager handles sst operations
 // that are used for compaction.
 type SSTManager struct {
+	// mutex here will lock the whole manager and
+	// sst map even if updates are done on different levels.
+	// will probably have a better solution later.
 	mu sync.RWMutex
 
-	file *os.File
-
-	closeFn func() error
+	// SST are stored in a map of [int][]*SST.
+	// the int is the level of the SST, each level
+	// contains the sst on corresponding level.
+	// the slice on each level is guaranteed to be
+	// sorted by insertion timestamp, because SST are
+	// appended to the slice on insertion.
+	ssts map[int][]*SST
 }
 
-func NewManifestManager() (*SSTManager, error) {
-	f, err := os.OpenFile(
-		path.Join(baseDir, SSTMANIFESTFileName),
-		os.O_APPEND|os.O_CREATE|os.O_SYNC|os.O_RDWR,
-		0744,
-	)
+func NewSSTManager() (*SSTManager, error) {
+	// Load ssts here
+	files, err := filepath.Glob(fmt.Sprintf("%s/*%s", baseDir, SSTFileFormat))
 	if err != nil {
 		return nil, err
 	}
 
+	ssts := parseSSTFiles(files)
+
+	sstm := make(map[int][]*SST)
+	sstm[1] = ssts
+
 	return &SSTManager{
-		file:    f,
-		closeFn: f.Close,
+		ssts: sstm,
 	}, nil
 }
 
-func (m *SSTManager) updateManifest(
-	action SSTAction,
-	state SSTState,
-	sstFileName string,
+type SSTUpdateQuery struct {
+	FileName string
+	State    SSTState
+}
+
+func (m *SSTManager) updateBatch(
+	level int,
+	sstUpdatequeries []SSTUpdateQuery,
 ) error {
 	m.mu.Lock()
-	// append file status in a whitespace separated string
-	// FLUSH BEGIN [sst_filename]
-	// FLUSH DONE [sst_filename]
-	// COMPACTION BEGIN [sst_filename]
-	// COMPACTION DONE [sst_filename]
-	cmd := fmt.Sprintf("%s %s %s\n", action, state, sstFileName)
+	defer m.mu.Unlock()
 
-	_, err := m.file.Write([]byte(cmd))
-	if err != nil {
-		return err
+	// build map for fast query
+	var queries map[string]SSTState
+	for _, q := range sstUpdatequeries {
+		queries[q.FileName] = q.State
+	}
+
+	for idx, sst := range m.ssts[level] {
+		newState, ok := queries[sst.FileName]
+		if ok {
+			m.ssts[level][idx].Status = newState
+		}
 	}
 
 	return nil
 }
 
-// ListUncompacted lists uncompacted sst files
-func (m *SSTManager) ListUncompacted(
+func (m *SSTManager) List(
 	level int,
-) []string {
+	state SSTState,
+	count int,
+) []*SST {
 	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-	r, err := m.file.Seek(0, io.SeekStart)
+	var res []*SST
+	for _, sst := range m.ssts[level] {
+		if sst.Status == state {
+			res = append(res, sst)
 
-	return nil
+			if len(res) == count {
+				return res
+			}
+		}
+	}
+
+	return res
 }
 
-func (m *SSTManager) cleanup() error {
-	return m.closeFn()
+// SST file name format is
+// level_uuid.sst
+func parseSSTFiles(fileNames []string) []*SST {
+	var res []*SST
+	for _, n := range fileNames {
+
+		// parse sst metadata
+		sst, err := parseSSTMetadata(n)
+		if err != nil {
+			log.Printf("error parsing sst %s : %s\n", n, err)
+			continue
+		}
+		fmt.Println(sst)
+		res = append(res, sst)
+	}
+
+	return res
+}
+
+func parseSSTMetadata(filename string) (*SST, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	defer f.Close()
+
+	// seek to bottom of the file
+	// to find metadata.
+
+	maxMetadataSize := 512
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	size := stat.Size()
+	readSize := int64(maxMetadataSize)
+	if size < readSize {
+		readSize = size
+	}
+
+	buf := make([]byte, readSize)
+
+	_, err = f.Seek(-readSize, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = f.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	// parse metadata from buffer
+	lines := strings.Split(string(buf), "\n")
+	fmt.Println(lines)
+	var level int
+	var ts time.Time
+
+	// TODO: Should find sst_done marker first to
+	// check if sst is fully written.
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "level: ") {
+			fmt.Sscanf(line, "level: %d", &level)
+		} else if strings.HasPrefix(line, "timestamp: ") {
+			var t string
+			fmt.Sscanf(line, "timestamp: %s", &t)
+			parsed, err := time.Parse(time.RFC3339, t)
+			if err != nil {
+				log.Println("error parsing sst")
+			}
+
+			ts = parsed
+		}
+	}
+
+	return &SST{
+		Level:     level,
+		Timestamp: ts,
+	}, nil
 }

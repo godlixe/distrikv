@@ -1,32 +1,46 @@
 package storage
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
+var (
+	ErrSSTIncomplete error = errors.New("sst is incomplete")
+)
+
+var SSTFileFormat = ".sst"
 var SSTMANIFESTFileName = "MANIFEST"
+var SSTDoneMarker = "<sst_done>"
 
 type SSTState int
 
+// SST States
+//
+// [SST_FLUSHING] -> (1) -> [SST_FLUSHED]
 const (
 	// initial sst state
-	FLUSHING SSTState = iota
+	SST_FLUSHING SSTState = iota
 
 	// in this state, the sst is ready to be compacted
-	FLUSHED
+	SST_FLUSHED
 
 	// state of a compacting sst
-	COMPACTING
+	SST_COMPACTING
 
 	// in this state, the sst is ready to be deleted
-	COMPACTED
+	SST_COMPACTED
 )
 
 // SST File Format
@@ -45,6 +59,11 @@ type SST struct {
 	Status    SSTState
 }
 
+type SSTLevel struct {
+	mu   sync.RWMutex
+	ssts []*SST
+}
+
 // SSTManager handles sst operations
 // that are used for compaction.
 type SSTManager struct {
@@ -59,7 +78,20 @@ type SSTManager struct {
 	// the slice on each level is guaranteed to be
 	// sorted by insertion timestamp, because SST are
 	// appended to the slice on insertion.
-	ssts map[int][]*SST
+	levels map[int]*SSTLevel
+}
+
+func NewSST() *SST {
+
+	// sstID is just a naming convention for SST Files.
+	// UUID is used to ensure there are no conflicting SST Filename.
+	sstID := uuid.New()
+	return &SST{
+		FileName:  fmt.Sprintf("%s%s", sstID, SSTFileFormat),
+		Level:     0,
+		Status:    SST_FLUSHING,
+		Timestamp: time.Now(),
+	}
 }
 
 func NewSSTManager() (*SSTManager, error) {
@@ -71,11 +103,21 @@ func NewSSTManager() (*SSTManager, error) {
 
 	ssts := parseSSTFiles(files)
 
-	sstm := make(map[int][]*SST)
-	sstm[1] = ssts
+	sstm := make(map[int]*SSTLevel)
+
+	for _, sst := range ssts {
+
+		if _, ok := sstm[sst.Level]; !ok {
+			sstm[sst.Level] = &SSTLevel{
+				ssts: make([]*SST, 0),
+			}
+		}
+
+		sstm[sst.Level].ssts = append(sstm[sst.Level].ssts, sst)
+	}
 
 	return &SSTManager{
-		ssts: sstm,
+		levels: sstm,
 	}, nil
 }
 
@@ -92,15 +134,16 @@ func (m *SSTManager) updateBatch(
 	defer m.mu.Unlock()
 
 	// build map for fast query
-	var queries map[string]SSTState
+	var queries map[string]SSTState = make(map[string]SSTState)
 	for _, q := range sstUpdatequeries {
 		queries[q.FileName] = q.State
 	}
 
-	for idx, sst := range m.ssts[level] {
+	m.levels[level].mu.Lock()
+	for idx, sst := range m.levels[level].ssts {
 		newState, ok := queries[sst.FileName]
 		if ok {
-			m.ssts[level][idx].Status = newState
+			m.levels[level].ssts[idx].Status = newState
 		}
 	}
 
@@ -109,15 +152,15 @@ func (m *SSTManager) updateBatch(
 
 func (m *SSTManager) List(
 	level int,
-	state SSTState,
+	states []SSTState,
 	count int,
 ) []*SST {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var res []*SST
-	for _, sst := range m.ssts[level] {
-		if sst.Status == state {
+	for _, sst := range m.levels[level].ssts {
+		if slices.Contains(states, sst.Status) {
 			res = append(res, sst)
 
 			if len(res) == count {
@@ -158,7 +201,6 @@ func parseSSTMetadata(filename string) (*SST, error) {
 
 	// seek to bottom of the file
 	// to find metadata.
-
 	maxMetadataSize := 512
 	stat, err := f.Stat()
 	if err != nil {
@@ -189,8 +231,9 @@ func parseSSTMetadata(filename string) (*SST, error) {
 	var level int
 	var ts time.Time
 
-	// TODO: Should find sst_done marker first to
-	// check if sst is fully written.
+	if lines[len(lines)-1] != "<sst_done>" {
+		return nil, ErrSSTIncomplete
+	}
 
 	for _, line := range lines {
 		if strings.HasPrefix(line, "level: ") {
@@ -204,6 +247,8 @@ func parseSSTMetadata(filename string) (*SST, error) {
 			}
 
 			ts = parsed
+		} else {
+			break
 		}
 	}
 
@@ -211,4 +256,36 @@ func parseSSTMetadata(filename string) (*SST, error) {
 		Level:     level,
 		Timestamp: ts,
 	}, nil
+}
+
+func (s *SSTManager) Flush(memtable *Memtable) error {
+	sst := NewSST()
+
+	f, err := os.OpenFile(
+		path.Join(baseDir, sst.FileName),
+		os.O_APPEND|os.O_CREATE|os.O_SYNC|os.O_RDWR,
+		0744,
+	)
+	if err != nil {
+		return err
+	}
+
+	defer f.Close()
+
+	var data string
+
+	for i := memtable.Iterate(); i.Valid(); i.Next() {
+		data += fmt.Sprintf(
+			"%s:%s\n",
+			i.Data().Key, i.Data().Value,
+		)
+	}
+
+	_, err = f.Write([]byte(data))
+	if err != nil {
+		return err
+	}
+
+	return nil
+
 }

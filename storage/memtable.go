@@ -8,6 +8,24 @@ import (
 	"github.com/godlixe/skiplist"
 )
 
+type MemtableState int
+
+// Memtable States
+//
+// [MEMTABLE_ACTIVE] -> (1) -> [MEMTABLE_FLUSHING] -> (2) -> [MEMTABLE_FLUSHED]
+//
+// 1. Memtable is full. LSM will then change the state of it to MEMTABLE_FLUSHING,
+// send it to flushing queue and inactive memtables to be queried.
+//
+// 2. Memtable has been flushed. The LSM will mark it as MEMTABLE_FLUSHED and remove it from the inactive memtables.
+const (
+	MEMTABLE_ACTIVE MemtableState = iota
+
+	MEMTABLE_FLUSHING
+
+	MEMTABLE_FLUSHED
+)
+
 // MemtableIterator is a wrapper for the
 // underlying skiplist iterator.
 type MemtableIterator struct {
@@ -30,6 +48,8 @@ func (i *MemtableIterator) Data() MemtableEntry {
 // Memtable stores data in memory before flushing it into SSTables.
 type Memtable struct {
 	Store skiplist.SkipList[MemtableEntry]
+
+	State MemtableState
 }
 
 // MemtableEntry is a struct for objects stored
@@ -50,6 +70,7 @@ func New() *Memtable {
 		Store: skiplist.NewDefault[MemtableEntry](
 			cmpMemtableEntry,
 		),
+		State: MEMTABLE_ACTIVE,
 	}
 }
 

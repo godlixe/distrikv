@@ -20,8 +20,12 @@ func (s *Store) Delete(key string) {
 	s.Backend.Delete(key)
 }
 
-func NewStore() Store {
+func NewStore(
+	sstManager *SSTManager,
+) Store {
+	lsmBackend := NewLSM(sstManager)
+
 	return Store{
-		Backend: NewLSM(),
+		Backend: lsmBackend,
 	}
 }

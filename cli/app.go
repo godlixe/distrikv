@@ -9,8 +9,14 @@ import (
 )
 
 func Start() {
-	store := storage.NewStore()
+	sstManager, err := storage.NewSSTManager()
+	if err != nil {
+		panic(err)
+	}
+
+	store := storage.NewStore(sstManager)
 	reader := bufio.NewReader(os.Stdin)
+
 	fmt.Println("In-memory KV store. Commands: set key value | get key | delete key | exit")
 
 	for {

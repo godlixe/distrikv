@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path"
 	"sync"
@@ -10,7 +11,6 @@ import (
 )
 
 var baseDir = "data"
-var SSTFileFormat = ".sst"
 
 // MemtableSizeThreshold in records
 var MemtableSizeThreshold = 5
@@ -25,19 +25,34 @@ type KVData struct {
 // Memtables will be implemented with sync.Map to ensure concurrency safety.
 // SSTables will be implemented with SSTables.
 type LSM struct {
-	mu       sync.RWMutex
+	mu sync.RWMutex
+
+	// Memtable is the current active memtable
+	// that stores the data in memory.
 	Memtable *Memtable
+
+	flushingMemtables []*Memtable
+
+	flushQueue chan *Memtable
+
+	sstManager *SSTManager
 }
 
-func NewLSM() *LSM {
-	return &LSM{
-		Memtable: NewMemtable(),
+func NewLSM(sstManager *SSTManager) *LSM {
+	lsm := &LSM{
+		Memtable:   NewMemtable(),
+		sstManager: sstManager,
+		flushQueue: make(chan *Memtable),
 	}
+
+	lsm.StartFlusher(lsm.flushQueue, sstManager)
+
+	return lsm
 }
 
 func (l *LSM) Set(key string, value string) {
-	l.checkFlush()
 	l.Memtable.Set(key, value, false)
+	l.checkFlush()
 }
 
 func (l *LSM) Get(key string) (*KVData, error) {
@@ -52,8 +67,8 @@ func (l *LSM) Get(key string) (*KVData, error) {
 }
 
 func (l *LSM) Delete(key string) {
-	l.checkFlush()
 	l.Memtable.Set(key, "", false)
+	l.checkFlush()
 }
 
 // Test flush if the record exceeds size threshold
@@ -114,6 +129,18 @@ func (l *LSM) checkFlush() {
 
 		// flush the old memtable,
 		// TODO: Needs error handling in case flushing fails
-		go Flush(old)
+		fmt.Println("sending")
+		l.flushQueue <- old
+		fmt.Println("sent")
 	}
+}
+
+func (l *LSM) StartFlusher(flushQueue <-chan *Memtable, sstManager *SSTManager) {
+	go func() {
+		for mt := range flushQueue {
+			if err := l.sstManager.Flush(mt); err != nil {
+				log.Print(err)
+			}
+		}
+	}()
 }

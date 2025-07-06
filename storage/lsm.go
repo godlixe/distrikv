@@ -3,11 +3,7 @@ package storage
 import (
 	"fmt"
 	"log"
-	"os"
-	"path"
 	"sync"
-
-	"github.com/google/uuid"
 )
 
 var baseDir = "data"
@@ -56,14 +52,30 @@ func (l *LSM) Set(key string, value string) {
 }
 
 func (l *LSM) Get(key string) (*KVData, error) {
+	var kvData KVData
+
 	data, err := l.Memtable.Get(key)
 	if err != nil {
 		return nil, err
 	}
-	return &KVData{
-		Key:   data.Key,
-		Value: data.Value,
-	}, nil
+
+	kvData.Key = data.Key
+	kvData.Value = data.Value
+
+	// TODO: add a marker to show if the data doesn't exist in memtable
+	// currently, if data is just an empty string, or is deleted in memtable
+	// it will query in the ssts
+
+	if kvData.Value == "" {
+		res, err := l.sstManager.QueryKey(key)
+		if err != nil {
+			return nil, err
+		}
+
+		kvData = *res
+	}
+
+	return &kvData, nil
 }
 
 func (l *LSM) Delete(key string) {
@@ -71,76 +83,39 @@ func (l *LSM) Delete(key string) {
 	l.checkFlush()
 }
 
-// Test flush if the record exceeds size threshold
-func Flush(memtable *Memtable) error {
-	filename := uuid.NewString()
-
-	// will flush as level 0, other levels
-	// are handled by compaction.
-	sstFullName := fmt.Sprintf("%s_%s.%s", "0", filename, SSTFileFormat)
-	// err := updateManifestFile(FLUSH, BEGIN, sstFullName)
-
-	// if err != nil {
-	// 	return err
-	// }
-
-	f, err := os.OpenFile(
-		path.Join(baseDir, sstFullName),
-		os.O_APPEND|os.O_CREATE|os.O_SYNC|os.O_RDWR,
-		0744,
-	)
-	if err != nil {
-		return err
-	}
-
-	defer f.Close()
-
-	var data string
-
-	for i := memtable.Iterate(); i.Valid(); i.Next() {
-		data += fmt.Sprintf(
-			"%s:%s\n",
-			i.Data().Key, i.Data().Value,
-		)
-	}
-
-	_, err = f.Write([]byte(data))
-	if err != nil {
-		return err
-	}
-
-	// err = updateManifestFile(FLUSH, DONE, sstFullName)
-	// if err != nil {
-	// 	return err
-	// }
-
-	return nil
-}
-
 func (l *LSM) checkFlush() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Println("checking, ", l.Memtable.Size(), MemtableSizeThreshold)
 
 	if l.Memtable.Size() >= MemtableSizeThreshold {
-		// create new memtable as the new one
 		old := l.Memtable
+
+		l.flushingMemtables = append(l.flushingMemtables, old)
 		l.Memtable = NewMemtable()
 
-		// flush the old memtable,
-		// TODO: Needs error handling in case flushing fails
-		fmt.Println("sending")
 		l.flushQueue <- old
-		fmt.Println("sent")
 	}
 }
 
 func (l *LSM) StartFlusher(flushQueue <-chan *Memtable, sstManager *SSTManager) {
 	go func() {
 		for mt := range flushQueue {
-			if err := l.sstManager.Flush(mt); err != nil {
+
+			fmt.Println(l.flushingMemtables)
+			// for now, only print error to log if there is a problem flushing
+			if err := l.sstManager.FlushSST(mt); err != nil {
 				log.Print(err)
 			}
+
+			// remove flushed memtable from flushingMemtables
+			l.mu.Lock()
+			for i := len(l.flushingMemtables) - 1; i >= 0; i-- {
+				if l.flushingMemtables[i] == mt {
+					l.flushingMemtables = append(l.flushingMemtables[0:i], l.flushingMemtables[i+1:]...)
+					break
+				}
+			}
+			l.mu.Unlock()
 		}
 	}()
 }

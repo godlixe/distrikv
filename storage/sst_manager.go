@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -47,7 +48,7 @@ const (
 // [KeyLength][Key][ValLength][Val]
 // ...
 // ...
-// <Metadata>
+// <metadata>
 // level [level]
 // timestamp [creation timestamp]
 // <sst_done> (just a marker for marking that a sst is done made)
@@ -81,15 +82,15 @@ type SSTManager struct {
 	levels map[int]*SSTLevel
 }
 
-func NewSST() *SST {
+func NewSST(level int, state SSTState) *SST {
 
 	// sstID is just a naming convention for SST Files.
 	// UUID is used to ensure there are no conflicting SST Filename.
 	sstID := uuid.New()
 	return &SST{
 		FileName:  fmt.Sprintf("%s%s", sstID, SSTFileFormat),
-		Level:     0,
-		Status:    SST_FLUSHING,
+		Level:     level,
+		Status:    state,
 		Timestamp: time.Now(),
 	}
 }
@@ -121,22 +122,18 @@ func NewSSTManager() (*SSTManager, error) {
 	}, nil
 }
 
-type SSTUpdateQuery struct {
-	FileName string
-	State    SSTState
-}
-
 func (m *SSTManager) updateBatch(
 	level int,
-	sstUpdatequeries []SSTUpdateQuery,
+	ssts []*SST,
+	state SSTState,
 ) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// build map for fast query
 	var queries map[string]SSTState = make(map[string]SSTState)
-	for _, q := range sstUpdatequeries {
-		queries[q.FileName] = q.State
+	for _, q := range ssts {
+		queries[q.FileName] = state
 	}
 
 	m.levels[level].mu.Lock()
@@ -150,7 +147,7 @@ func (m *SSTManager) updateBatch(
 	return nil
 }
 
-func (m *SSTManager) List(
+func (m *SSTManager) ListSST(
 	level int,
 	states []SSTState,
 	count int,
@@ -184,6 +181,7 @@ func parseSSTFiles(fileNames []string) []*SST {
 			log.Printf("error parsing sst %s : %s\n", n, err)
 			continue
 		}
+		sst.FileName = n
 		fmt.Println(sst)
 		res = append(res, sst)
 	}
@@ -253,13 +251,16 @@ func parseSSTMetadata(filename string) (*SST, error) {
 	}
 
 	return &SST{
+		FileName:  filename,
 		Level:     level,
 		Timestamp: ts,
+		Status:    SST_FLUSHED,
 	}, nil
 }
 
-func (s *SSTManager) Flush(memtable *Memtable) error {
-	sst := NewSST()
+// TODO: Restructure SST format to include tombstone and timestamp
+func (s *SSTManager) FlushSST(memtable *Memtable) error {
+	sst := NewSST(0, SST_FLUSHING)
 
 	f, err := os.OpenFile(
 		path.Join(baseDir, sst.FileName),
@@ -274,6 +275,7 @@ func (s *SSTManager) Flush(memtable *Memtable) error {
 
 	var data string
 
+	// add stored data
 	for i := memtable.Iterate(); i.Valid(); i.Next() {
 		data += fmt.Sprintf(
 			"%s:%s\n",
@@ -281,11 +283,65 @@ func (s *SSTManager) Flush(memtable *Memtable) error {
 		)
 	}
 
+	// add metadata
+	data += fmt.Sprintf("<metadata>\nlevel: %d\ntimestamp: %s\n<sst_done>", 0, time.Now().Format(time.RFC3339))
 	_, err = f.Write([]byte(data))
 	if err != nil {
 		return err
 	}
 
 	return nil
+}
 
+func (s *SSTManager) GetLevels() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return len(s.levels)
+}
+
+func (s *SSTManager) AddLevel() {
+	s.mu.Lock()
+	// map[len]
+}
+
+func (s *SSTManager) QueryKey(key string) (*KVData, error) {
+	s.mu.RLock()
+	levels := s.levels
+	s.mu.RUnlock()
+
+	var data KVData
+	for _, level := range levels {
+		level.mu.RLock()
+
+		for _, sst := range level.ssts {
+			f, err := os.Open(sst.FileName)
+			if err != nil {
+				return nil, err
+			}
+
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				// TODO: Binary search the file for key
+				parts := strings.SplitN(scanner.Text(), ":", 2)
+				if len(parts) == 2 {
+					if parts[0] == key {
+						data = KVData{
+							Key:   parts[0],
+							Value: parts[1],
+						}
+						break
+					}
+				}
+			}
+
+			if data.Key != "" {
+				break
+			}
+		}
+
+		level.mu.RUnlock()
+	}
+
+	return &data, nil
 }

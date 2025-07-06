@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"distrikv/storage"
 	"fmt"
 	"os"
@@ -13,6 +14,10 @@ func Start() {
 	if err != nil {
 		panic(err)
 	}
+
+	compactorManager := storage.NewCompactorManager(sstManager)
+
+	compactorManager.StartCompactors(context.Background())
 
 	store := storage.NewStore(sstManager)
 	reader := bufio.NewReader(os.Stdin)

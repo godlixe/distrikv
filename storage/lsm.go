@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"fmt"
 	"log"
 	"sync"
 )
@@ -101,7 +100,6 @@ func (l *LSM) StartFlusher(flushQueue <-chan *Memtable, sstManager *SSTManager) 
 	go func() {
 		for mt := range flushQueue {
 
-			fmt.Println(l.flushingMemtables)
 			// for now, only print error to log if there is a problem flushing
 			if err := l.sstManager.FlushSST(mt); err != nil {
 				log.Print(err)

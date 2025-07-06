@@ -1,9 +1,22 @@
 package main
 
 import (
-	"distrikv/cli"
+	"context"
+	"distrikv/api"
+	"distrikv/storage"
 )
 
 func main() {
-	cli.Start()
+	sstManager, err := storage.NewSSTManager()
+	if err != nil {
+		panic(err)
+	}
+
+	compactorManager := storage.NewCompactorManager(sstManager)
+
+	compactorManager.StartCompactors(context.Background())
+
+	store := storage.NewStore(sstManager)
+
+	api.Start(&store)
 }

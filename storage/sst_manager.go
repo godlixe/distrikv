@@ -82,17 +82,31 @@ type SSTManager struct {
 	levels map[int]*SSTLevel
 }
 
-func NewSST(level int, state SSTState) *SST {
+func (s *SSTManager) NewSST(level int, state SSTState) *SST {
 
 	// sstID is just a naming convention for SST Files.
 	// UUID is used to ensure there are no conflicting SST Filename.
 	sstID := uuid.New()
-	return &SST{
+	sst := &SST{
 		FileName:  fmt.Sprintf("%s%s", sstID, SSTFileFormat),
 		Level:     level,
 		Status:    state,
 		Timestamp: time.Now(),
 	}
+
+	if level > s.GetLevels()-1 {
+		s.levels[level] = &SSTLevel{
+			ssts: make([]*SST, 0),
+		}
+	}
+
+	s.mu.Lock()
+	s.levels[level].mu.Lock()
+	s.levels[level].ssts = append(s.levels[level].ssts, sst)
+	s.levels[level].mu.Unlock()
+
+	s.mu.Unlock()
+	return sst
 }
 
 func NewSSTManager() (*SSTManager, error) {
@@ -144,6 +158,8 @@ func (m *SSTManager) updateBatch(
 		}
 	}
 
+	m.levels[level].mu.Unlock()
+
 	return nil
 }
 
@@ -156,6 +172,8 @@ func (m *SSTManager) ListSST(
 	defer m.mu.RUnlock()
 
 	var res []*SST
+	m.levels[level].mu.RLock()
+	defer m.levels[level].mu.RUnlock()
 	for _, sst := range m.levels[level].ssts {
 		if slices.Contains(states, sst.Status) {
 			res = append(res, sst)
@@ -181,8 +199,7 @@ func parseSSTFiles(fileNames []string) []*SST {
 			log.Printf("error parsing sst %s : %s\n", n, err)
 			continue
 		}
-		sst.FileName = n
-		fmt.Println(sst)
+		sst.FileName = path.Base(n)
 		res = append(res, sst)
 	}
 
@@ -225,7 +242,6 @@ func parseSSTMetadata(filename string) (*SST, error) {
 
 	// parse metadata from buffer
 	lines := strings.Split(string(buf), "\n")
-	fmt.Println(lines)
 	var level int
 	var ts time.Time
 
@@ -260,7 +276,7 @@ func parseSSTMetadata(filename string) (*SST, error) {
 
 // TODO: Restructure SST format to include tombstone and timestamp
 func (s *SSTManager) FlushSST(memtable *Memtable) error {
-	sst := NewSST(0, SST_FLUSHING)
+	sst := s.NewSST(0, SST_FLUSHING)
 
 	f, err := os.OpenFile(
 		path.Join(baseDir, sst.FileName),
@@ -302,6 +318,7 @@ func (s *SSTManager) GetLevels() int {
 
 func (s *SSTManager) AddLevel() {
 	s.mu.Lock()
+	s.mu.Unlock()
 	// map[len]
 }
 
@@ -315,7 +332,7 @@ func (s *SSTManager) QueryKey(key string) (*KVData, error) {
 		level.mu.RLock()
 
 		for _, sst := range level.ssts {
-			f, err := os.Open(sst.FileName)
+			f, err := os.Open(path.Join(baseDir, sst.FileName))
 			if err != nil {
 				return nil, err
 			}

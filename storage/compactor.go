@@ -80,7 +80,6 @@ func (c *CompactorManager) StartCompactors(ctx context.Context) {
 	// about total levels and add more compactors
 
 	totalLevels := c.sstManager.GetLevels()
-	fmt.Println("total levels: ", totalLevels)
 
 	for idx := range totalLevels {
 		compactor := NewCompactor(idx, c.sstManager)
@@ -123,7 +122,6 @@ func (c *Compactor) startCompactor(ctx context.Context) {
 			if err != nil {
 				log.Print("error updating sst: ", err)
 			}
-
 		}
 	}
 }
@@ -133,7 +131,7 @@ func (c *Compactor) compact(ssts []*SST) error {
 	var files []*os.File
 
 	for _, sst := range ssts {
-		f, err := os.Open(sst.FileName)
+		f, err := os.Open(path.Join(baseDir, sst.FileName))
 		if err != nil {
 			return err
 		}
@@ -170,20 +168,13 @@ func (c *Compactor) compact(ssts []*SST) error {
 		}
 	}
 
-	outSST := NewSST(c.Level+1, SST_COMPACTING)
+	outSST := c.sstManager.NewSST(c.Level+1, SST_COMPACTING)
 	outFile, err := os.Create(path.Join(baseDir, outSST.FileName))
 	if err != nil {
 		return err
 	}
-	defer outFile.Close()
 
 	outWriter := bufio.NewWriter(outFile)
-
-	defer func() {
-		if err := outWriter.Flush(); err != nil {
-			log.Println("flush failed: ", err)
-		}
-	}()
 
 	var lastKey string
 
@@ -216,6 +207,9 @@ func (c *Compactor) compact(ssts []*SST) error {
 	if err != nil {
 		return err
 	}
+
+	outWriter.Flush()
+	outFile.Close()
 
 	return err
 }

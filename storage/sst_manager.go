@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path"
@@ -43,22 +42,6 @@ const (
 	// in this state, the sst is ready to be deleted
 	SST_COMPACTED
 )
-
-// SST File Format
-// [KeyLength][Key][ValLength][Val]
-// ...
-// ...
-// <metadata>
-// level [level]
-// timestamp [creation timestamp]
-// <sst_done> (just a marker for marking that a sst is done made)
-
-type SST struct {
-	FileName  string
-	Level     int
-	Timestamp time.Time
-	Status    SSTState
-}
 
 type SSTLevel struct {
 	mu   sync.RWMutex
@@ -204,74 +187,6 @@ func parseSSTFiles(fileNames []string) []*SST {
 	}
 
 	return res
-}
-
-func parseSSTMetadata(filename string) (*SST, error) {
-	f, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-
-	defer f.Close()
-
-	// seek to bottom of the file
-	// to find metadata.
-	maxMetadataSize := 512
-	stat, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-
-	size := stat.Size()
-	readSize := int64(maxMetadataSize)
-	if size < readSize {
-		readSize = size
-	}
-
-	buf := make([]byte, readSize)
-
-	_, err = f.Seek(-readSize, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = f.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-
-	// parse metadata from buffer
-	lines := strings.Split(string(buf), "\n")
-	var level int
-	var ts time.Time
-
-	if lines[len(lines)-1] != "<sst_done>" {
-		return nil, ErrSSTIncomplete
-	}
-
-	for _, line := range lines {
-		if strings.HasPrefix(line, "level: ") {
-			fmt.Sscanf(line, "level: %d", &level)
-		} else if strings.HasPrefix(line, "timestamp: ") {
-			var t string
-			fmt.Sscanf(line, "timestamp: %s", &t)
-			parsed, err := time.Parse(time.RFC3339, t)
-			if err != nil {
-				log.Println("error parsing sst")
-			}
-
-			ts = parsed
-		} else {
-			break
-		}
-	}
-
-	return &SST{
-		FileName:  filename,
-		Level:     level,
-		Timestamp: ts,
-		Status:    SST_FLUSHED,
-	}, nil
 }
 
 // TODO: Restructure SST format to include tombstone and timestamp

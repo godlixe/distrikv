@@ -9,8 +9,9 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"strings"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -46,6 +47,10 @@ const (
 type SSTLevel struct {
 	mu   sync.RWMutex
 	ssts []*SST
+
+	// counter is used to add incremental numbering for the SST files.
+	// incremental numbering is used for sorting the sst files.
+	counter atomic.Uint64
 }
 
 // SSTManager handles sst operations
@@ -67,20 +72,25 @@ type SSTManager struct {
 
 func (s *SSTManager) NewSST(level int, state SSTState) *SST {
 
-	// sstID is just a naming convention for SST Files.
-	// UUID is used to ensure there are no conflicting SST Filename.
-	sstID := uuid.New()
-	sst := &SST{
-		FileName:  fmt.Sprintf("%s%s", sstID, SSTFileFormat),
-		Level:     level,
-		Status:    state,
-		Timestamp: time.Now(),
-	}
-
 	if level > s.GetLevels()-1 {
 		s.levels[level] = &SSTLevel{
 			ssts: make([]*SST, 0),
 		}
+	}
+
+	// increment level counter
+	s.levels[level].counter.Add(1)
+
+	// sstID is just a naming convention for SST Files.
+	// UUID is used to ensure there are no conflicting SST Filename.
+	sstID := s.levels[level].counter.Load()
+	sstUUID := uuid.New()
+	sst := &SST{
+		ID:        sstID,
+		FileName:  fmt.Sprintf("%d_%d_%s%s", level, sstID, sstUUID, SSTFileFormat),
+		Level:     level,
+		Status:    state,
+		Timestamp: time.Now(),
 	}
 
 	s.mu.Lock()
@@ -103,6 +113,8 @@ func NewSSTManager() (*SSTManager, error) {
 
 	sstm := make(map[int]*SSTLevel)
 
+	levelMaxID := make(map[int]uint64)
+
 	for _, sst := range ssts {
 
 		if _, ok := sstm[sst.Level]; !ok {
@@ -112,6 +124,14 @@ func NewSSTManager() (*SSTManager, error) {
 		}
 
 		sstm[sst.Level].ssts = append(sstm[sst.Level].ssts, sst)
+		levelMaxID[sst.Level] = max(levelMaxID[sst.Level], sst.ID)
+	}
+
+	for idx, level := range sstm {
+		level.counter.Store(levelMaxID[idx])
+		sort.Slice(level.ssts, func(a, b int) bool {
+			return level.ssts[a].ID < level.ssts[b].ID
+		})
 	}
 
 	return &SSTManager{
@@ -204,19 +224,19 @@ func (s *SSTManager) FlushSST(memtable *Memtable) error {
 
 	defer f.Close()
 
-	var data string
+	writer := bufio.NewWriter(f)
 
 	// add stored data
 	for i := memtable.Iterate(); i.Valid(); i.Next() {
-		data += fmt.Sprintf(
-			"%s:%s\n",
-			i.Data().Key, i.Data().Value,
-		)
+		err := encodeSSTEntry(writer, i.Data().Key, i.Data().Value, i.Data().Deleted)
+		if err != nil {
+			return err
+		}
 	}
 
-	// add metadata
-	data += fmt.Sprintf("<metadata>\nlevel: %d\ntimestamp: %s\n<sst_done>", 0, time.Now().Format(time.RFC3339))
-	_, err = f.Write([]byte(data))
+	writeSSTMetadata(writer, sst.ID, 0, time.Now())
+
+	err = writer.Flush()
 	if err != nil {
 		return err
 	}
@@ -231,12 +251,6 @@ func (s *SSTManager) GetLevels() int {
 	return len(s.levels)
 }
 
-func (s *SSTManager) AddLevel() {
-	s.mu.Lock()
-	s.mu.Unlock()
-	// map[len]
-}
-
 func (s *SSTManager) QueryKey(key string) (*KVData, error) {
 	s.mu.RLock()
 	levels := s.levels
@@ -246,29 +260,20 @@ func (s *SSTManager) QueryKey(key string) (*KVData, error) {
 	for _, level := range levels {
 		level.mu.RLock()
 
+		// TODO: SSTs doesn't seem to be sorted in the intended way when flushed
 		for _, sst := range level.ssts {
-			f, err := os.Open(path.Join(baseDir, sst.FileName))
+			data, err := sst.FindKey(key)
 			if err != nil {
+				level.mu.RUnlock()
 				return nil, err
 			}
-
-			scanner := bufio.NewScanner(f)
-			for scanner.Scan() {
-				// TODO: Binary search the file for key
-				parts := strings.SplitN(scanner.Text(), ":", 2)
-				if len(parts) == 2 {
-					if parts[0] == key {
-						data = KVData{
-							Key:   parts[0],
-							Value: parts[1],
-						}
-						break
-					}
-				}
-			}
-
-			if data.Key != "" {
-				break
+			if data != nil {
+				level.mu.RUnlock()
+				return &KVData{
+					Key:       data.Key,
+					Value:     data.Value,
+					IsDeleted: data.IsDeleted,
+				}, nil
 			}
 		}
 

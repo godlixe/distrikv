@@ -11,8 +11,9 @@ var baseDir = "data"
 var MemtableSizeThreshold = 5
 
 type KVData struct {
-	Key   string
-	Value string
+	Key       string
+	Value     string
+	IsDeleted bool
 }
 
 // LSM is a struct for Log-Structured Merge Tree.

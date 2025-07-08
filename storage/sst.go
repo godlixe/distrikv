@@ -1,15 +1,19 @@
 package storage
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
+
+var ErrSSTEntryEOF error = errors.New("sst eof reached")
 
 // SST File Format
 // [TotalLength][KeyLength][Key][ValLength][Val][IsDeleted]
@@ -27,87 +31,45 @@ type SSTEntry struct {
 }
 
 type SST struct {
+	ID        uint64
 	FileName  string
 	Level     int
 	Timestamp time.Time
 	Status    SSTState
 }
 
-func (s *SST) FindKey(key string) (*KVData, error) {
-	return nil, nil
-}
-
-// Writes the SST Content to w
-func (s SST) DecodeSST(w io.Writer) error {
-	return nil
-}
-
-func parseSSTMetadata(filename string) (*SST, error) {
-	f, err := os.Open(filename)
+func (s *SST) FindKey(key string) (*SSTEntry, error) {
+	f, err := os.Open(path.Join(baseDir, s.FileName))
 	if err != nil {
 		return nil, err
 	}
 
 	defer f.Close()
 
-	// seek to bottom of the file
-	// to find metadata.
-	maxMetadataSize := 512
-	stat, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		// TODO: Binary search the file for key
+		entry, err := parseSSTLine(scanner.Bytes())
+		if err != nil && err != ErrSSTEntryEOF {
+			return nil, err
+		}
 
-	size := stat.Size()
-	readSize := int64(maxMetadataSize)
-	if size < readSize {
-		readSize = size
-	}
+		// return if SST EOF reached
+		if errors.Is(err, ErrSSTEntryEOF) {
+			return nil, nil
+		}
 
-	buf := make([]byte, readSize)
-
-	_, err = f.Seek(-readSize, io.SeekEnd)
-	if err != nil {
-		return nil, err
-	}
-
-	_, err = f.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-
-	// parse metadata from buffer
-	lines := strings.Split(string(buf), "\n")
-	var level int
-	var ts time.Time
-
-	if lines[len(lines)-1] != "<sst_done>" {
-		return nil, ErrSSTIncomplete
-	}
-
-	for _, line := range lines {
-		if strings.HasPrefix(line, "level: ") {
-			fmt.Sscanf(line, "level: %d", &level)
-		} else if strings.HasPrefix(line, "timestamp: ") {
-			var t string
-			fmt.Sscanf(line, "timestamp: %s", &t)
-			parsed, err := time.Parse(time.RFC3339, t)
-			if err != nil {
-				log.Println("error parsing sst")
-			}
-
-			ts = parsed
-		} else {
-			break
+		if entry != nil && entry.Key == key {
+			return entry, nil
 		}
 	}
 
-	return &SST{
-		FileName:  filename,
-		Level:     level,
-		Timestamp: ts,
-		Status:    SST_FLUSHED,
-	}, nil
+	return nil, nil
+}
+
+// Writes the SST Content to w
+func (s SST) DecodeSST(w io.Writer) error {
+	return nil
 }
 
 func encodeSSTEntry(w io.Writer, key string, value string, isDeleted bool) error {
@@ -145,14 +107,27 @@ func encodeSSTEntry(w io.Writer, key string, value string, isDeleted bool) error
 		return err
 	}
 
+	// TODO: should this have a newline?
+	if _, err := w.Write([]byte{'\n'}); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func writeSSTMetadata(w io.Writer, level int, timestamp time.Time) {
+func writeSSTMetadata(w io.Writer, id uint64, level int, timestamp time.Time) error {
+	metadata := fmt.Sprintf("\n<metadata>\nlevel: %d\ntimestamp: %s\nid: %d\n<sst_done>", level, timestamp.Format(time.RFC3339), id)
+	if _, err := w.Write([]byte(metadata)); err != nil {
+		return err
+	}
 
+	return nil
 }
 
 func parseSSTLine(line []byte) (*SSTEntry, error) {
+	if len(line) == 0 {
+		return nil, ErrSSTEntryEOF
+	}
 
 	if len(line) < 13 {
 		return nil, errors.New("line too short")
@@ -195,5 +170,76 @@ func parseSSTLine(line []byte) (*SSTEntry, error) {
 		Key:       key,
 		Value:     value,
 		IsDeleted: isDeleted,
+	}, nil
+}
+
+func parseSSTMetadata(filename string) (*SST, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	defer f.Close()
+
+	// seek to bottom of the file
+	// to find metadata.
+	maxMetadataSize := 512
+	stat, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	size := stat.Size()
+	readSize := int64(maxMetadataSize)
+	if size < readSize {
+		readSize = size
+	}
+
+	buf := make([]byte, readSize)
+
+	_, err = f.Seek(-readSize, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = f.Read(buf)
+	if err != nil {
+		return nil, err
+	}
+
+	// parse metadata from buffer
+	lines := strings.Split(string(buf), "\n")
+	var level int
+	var ts time.Time
+	var id uint64
+
+	if lines[len(lines)-1] != "<sst_done>" {
+		return nil, ErrSSTIncomplete
+	}
+
+	for _, line := range lines {
+		if strings.HasPrefix(line, "level: ") {
+			fmt.Sscanf(line, "level: %d", &level)
+		} else if strings.HasPrefix(line, "timestamp: ") {
+			var t string
+			fmt.Sscanf(line, "timestamp: %s", &t)
+			parsed, err := time.Parse(time.RFC3339, t)
+			if err != nil {
+				log.Println("error parsing sst")
+			}
+			ts = parsed
+		} else if strings.HasPrefix(line, "id: ") {
+			fmt.Sscanf(line, "id: %d", &id)
+		} else {
+			break
+		}
+	}
+
+	return &SST{
+		ID:        id,
+		FileName:  filename,
+		Level:     level,
+		Timestamp: ts,
+		Status:    SST_FLUSHED,
 	}, nil
 }

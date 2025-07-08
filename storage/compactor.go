@@ -4,20 +4,20 @@ import (
 	"bufio"
 	"container/heap"
 	"context"
-	"fmt"
+	"errors"
 	"log"
 	"os"
 	"path"
-	"strings"
 	"time"
 )
 
 const MAX_SST_PER_LEVEL = 2
 
 type kvEntry struct {
-	key    string
-	value  string
-	fileID int
+	key       string
+	value     string
+	isDeleted bool
+	fileID    int
 }
 
 type kvHeap []*kvEntry
@@ -157,14 +157,16 @@ func (c *Compactor) compact(ssts []*SST) error {
 
 	for idx, scanner := range scanners {
 		if scanner.Scan() {
-			parts := strings.SplitN(scanner.Text(), ":", 2)
-			if len(parts) == 2 {
-				heap.Push(h, &kvEntry{
-					key:    parts[0],
-					value:  parts[1],
-					fileID: idx,
-				})
+			entry, err := parseSSTLine(scanner.Bytes())
+			if err != nil {
+				return err
 			}
+
+			heap.Push(h, &kvEntry{
+				key:    entry.Key,
+				value:  entry.Value,
+				fileID: idx,
+			})
 		}
 	}
 
@@ -183,33 +185,47 @@ func (c *Compactor) compact(ssts []*SST) error {
 
 		// FIFO setup, first unique key to be found is consider the latest
 		if entry.key != lastKey {
-			_, err := outWriter.WriteString(fmt.Sprintf("%s:%s\n", entry.key, entry.value))
+			err := encodeSSTEntry(outWriter, entry.key, entry.value, entry.isDeleted)
 			if err != nil {
 				return err
 			}
 			lastKey = entry.key
 		}
 
+		// advance entry scanner
 		scanner := scanners[entry.fileID]
 		if scanner.Scan() {
-			parts := strings.SplitN(scanner.Text(), ":", 2)
-			if len(parts) == 2 {
-				heap.Push(h, &kvEntry{
-					key:    parts[0],
-					value:  parts[1],
-					fileID: entry.fileID,
-				})
+			sstEntry, err := parseSSTLine(scanner.Bytes())
+			if err != nil && !errors.Is(err, ErrSSTEntryEOF) {
+				return err
 			}
+
+			if errors.Is(err, ErrSSTEntryEOF) {
+				continue
+			}
+
+			heap.Push(h, &kvEntry{
+				key:    sstEntry.Key,
+				value:  sstEntry.Value,
+				fileID: entry.fileID,
+			})
 		}
 	}
 
-	_, err = outWriter.WriteString(fmt.Sprintf("<metadata>\nlevel: %d\ntimestamp: %s\n<sst_done>", c.Level+1, time.Now().Format(time.RFC3339)))
+	err = writeSSTMetadata(outWriter, outSST.ID, c.Level+1, time.Now())
 	if err != nil {
 		return err
 	}
 
-	outWriter.Flush()
-	outFile.Close()
+	err = outWriter.Flush()
+	if err != nil {
+		return err
+	}
+
+	err = outFile.Close()
+	if err != nil {
+		return err
+	}
 
 	return err
 }

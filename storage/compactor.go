@@ -5,6 +5,7 @@ import (
 	"container/heap"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path"
@@ -87,6 +88,7 @@ func (c *CompactorManager) StartCompactors(ctx context.Context) {
 		go compactor.startCompactor(ctx)
 	}
 
+	go c.startLevelChecker(ctx)
 }
 
 func (c *Compactor) startCompactor(ctx context.Context) {
@@ -103,6 +105,7 @@ func (c *Compactor) startCompactor(ctx context.Context) {
 				[]SSTState{SST_FLUSHED},
 				MAX_SST_PER_LEVEL,
 			)
+			fmt.Println("levels", c.Level)
 
 			if len(ssts) < MAX_SST_PER_LEVEL {
 				break
@@ -121,6 +124,29 @@ func (c *Compactor) startCompactor(ctx context.Context) {
 			)
 			if err != nil {
 				log.Print("error updating sst: ", err)
+			}
+		}
+	}
+}
+
+func (c *CompactorManager) startLevelChecker(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			levels := c.sstManager.GetLevels()
+			fmt.Println("checking levels: ", levels, c.compactors)
+
+			if len(c.compactors) < levels {
+				for idx := len(c.compactors); idx < levels; idx++ {
+					compactor := NewCompactor(idx, c.sstManager)
+					c.compactors = append(c.compactors, *compactor)
+					go compactor.startCompactor(ctx)
+				}
 			}
 		}
 	}

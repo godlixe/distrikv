@@ -7,8 +7,8 @@ This is work in progress of a distributed LSM-Tree based key-value store. distri
 
 TODOs:
 - [x] Stores and queries data in-memory
-- [ ] Stores and queries data from files
-- [ ] Properly compact SST
-- [ ] Restructure SST Format
+- [x] Stores and queries data from files
+- [x] Properly compact SST
+- [x] Restructure SST Format
 - [ ] Refine logging
-- [ ] Add REST API
+- [x] Add REST API

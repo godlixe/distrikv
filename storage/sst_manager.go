@@ -241,6 +241,11 @@ func (s *SSTManager) FlushSST(memtable *Memtable) error {
 		return err
 	}
 
+	err = s.updateBatch(0, []*SST{sst}, SST_FLUSHED)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 

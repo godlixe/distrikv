@@ -12,6 +12,8 @@ func main() {
 		panic(err)
 	}
 
+	go sstManager.StartCleaner(context.Background())
+
 	compactorManager := storage.NewCompactorManager(sstManager)
 
 	compactorManager.StartCompactors(context.Background())

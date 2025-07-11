@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const MAX_SST_PER_LEVEL = 2
+const MAX_SST_PER_LEVEL = 5
 
 type kvEntry struct {
 	key       string

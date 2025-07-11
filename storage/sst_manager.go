@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -190,6 +191,27 @@ func (m *SSTManager) ListSST(
 	return res
 }
 
+func (m *SSTManager) RemoveSST(
+	level int,
+	ssts []*SST,
+) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.levels[level].mu.Lock()
+	defer m.levels[level].mu.Unlock()
+
+	var final []*SST
+	for _, sst := range m.levels[level].ssts {
+		if slices.Contains(ssts, sst) {
+			continue
+		}
+
+		final = append(final, sst)
+	}
+	m.levels[level].ssts = final
+}
+
 // SST file name format is
 // level_uuid.sst
 func parseSSTFiles(fileNames []string) []*SST {
@@ -286,4 +308,43 @@ func (s *SSTManager) QueryKey(key string) (*KVData, error) {
 	}
 
 	return &data, nil
+}
+
+// Cleans compacted sst
+func (s *SSTManager) StartCleaner(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.RLock()
+			levels := s.levels
+			s.mu.RUnlock()
+
+			for level := range len(levels) {
+				ssts := s.ListSST(
+					level,
+					[]SSTState{SST_COMPACTED},
+					MAX_SST_PER_LEVEL,
+				)
+
+				if len(ssts) < MAX_SST_PER_LEVEL {
+					break
+				}
+
+				s.RemoveSST(level, ssts)
+
+				// cleanup files
+				for _, sst := range ssts {
+					err := os.Remove(path.Join(baseDir, sst.FileName))
+					if err != nil {
+						log.Print(err)
+					}
+				}
+			}
+		}
+	}
 }

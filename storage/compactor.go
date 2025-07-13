@@ -5,10 +5,10 @@ import (
 	"container/heap"
 	"context"
 	"errors"
-	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path"
+	"slices"
 	"time"
 )
 
@@ -48,42 +48,51 @@ func (h *kvHeap) Pop() any {
 }
 
 type Compactor struct {
+	logger     *slog.Logger
 	Level      int
 	sstManager *SSTManager
 }
 
-func NewCompactor(level int, sstManager *SSTManager) *Compactor {
+func NewCompactor(
+	logger *slog.Logger,
+	level int,
+	sstManager *SSTManager,
+) *Compactor {
 	return &Compactor{
+		logger:     logger,
 		Level:      level,
 		sstManager: sstManager,
 	}
 }
 
 type CompactorManager struct {
+	logger     *slog.Logger
 	sstManager *SSTManager
 	compactors []Compactor
 }
 
 func NewCompactorManager(
+	logger *slog.Logger,
 	sstManager *SSTManager,
 ) *CompactorManager {
 	return &CompactorManager{
+		logger:     logger,
 		sstManager: sstManager,
 	}
 }
 
 func (c *CompactorManager) StartCompactors(ctx context.Context) {
-	log.Print("starting compactors")
+	c.logger.Info("starting compactors")
 	// TODO: will query for how many levels (n) of sst
 	// there currently is and start n numbers
 	// of goroutine to monitor each level.
 	// will also have a goroutine to poll the sst manager
 	// about total levels and add more compactors
 
-	totalLevels := c.sstManager.GetLevels()
+	levels := c.sstManager.GetLevels()
 
-	for idx := range totalLevels {
-		compactor := NewCompactor(idx, c.sstManager)
+	for _, level := range levels {
+		compactor := NewCompactor(c.logger, level, c.sstManager)
 		c.compactors = append(c.compactors, *compactor)
 		go compactor.startCompactor(ctx)
 	}
@@ -105,7 +114,6 @@ func (c *Compactor) startCompactor(ctx context.Context) {
 				[]SSTState{SST_FLUSHED},
 				MAX_SST_PER_LEVEL,
 			)
-			fmt.Println("levels", c.Level)
 
 			if len(ssts) < MAX_SST_PER_LEVEL {
 				break
@@ -113,7 +121,8 @@ func (c *Compactor) startCompactor(ctx context.Context) {
 
 			err := c.compact(ssts)
 			if err != nil {
-				log.Print("error compacting sst: ", err)
+				c.logger.Error("error compacting SST", "err", err)
+				break
 			}
 
 			// update sst to be deleted
@@ -123,10 +132,20 @@ func (c *Compactor) startCompactor(ctx context.Context) {
 				SST_COMPACTED,
 			)
 			if err != nil {
-				log.Print("error updating sst: ", err)
+				c.logger.Error("error updating SST", "err", err)
+				break
 			}
 		}
 	}
+}
+
+func (c *CompactorManager) GetLevels() []int {
+	var levels []int
+	for _, compactor := range c.compactors {
+		levels = append(levels, compactor.Level)
+	}
+
+	return levels
 }
 
 func (c *CompactorManager) startLevelChecker(ctx context.Context) {
@@ -139,11 +158,11 @@ func (c *CompactorManager) startLevelChecker(ctx context.Context) {
 			return
 		case <-ticker.C:
 			levels := c.sstManager.GetLevels()
-			fmt.Println("checking levels: ", levels, c.compactors)
+			existingLevels := c.GetLevels()
 
-			if len(c.compactors) < levels {
-				for idx := len(c.compactors); idx < levels; idx++ {
-					compactor := NewCompactor(idx, c.sstManager)
+			for _, level := range levels {
+				if !slices.Contains(existingLevels, level) {
+					compactor := NewCompactor(c.logger, level, c.sstManager)
 					c.compactors = append(c.compactors, *compactor)
 					go compactor.startCompactor(ctx)
 				}
@@ -172,7 +191,7 @@ func (c *Compactor) compact(ssts []*SST) error {
 		for _, f := range files {
 			err := f.Close()
 			if err != nil {
-				log.Println("error closing file: ", err)
+				c.logger.Error("error closing file", "file", f.Name(), "err", err)
 			}
 		}
 	}()

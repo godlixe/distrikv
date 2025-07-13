@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -57,6 +57,7 @@ type SSTLevel struct {
 // SSTManager handles sst operations
 // that are used for compaction.
 type SSTManager struct {
+	logger *slog.Logger
 	// mutex here will lock the whole manager and
 	// sst map even if updates are done on different levels.
 	// will probably have a better solution later.
@@ -72,8 +73,9 @@ type SSTManager struct {
 }
 
 func (s *SSTManager) NewSST(level int, state SSTState) *SST {
+	levels := s.GetLevels()
 
-	if level > s.GetLevels()-1 {
+	if !slices.Contains(levels, level) {
 		s.levels[level] = &SSTLevel{
 			ssts: make([]*SST, 0),
 		}
@@ -103,14 +105,15 @@ func (s *SSTManager) NewSST(level int, state SSTState) *SST {
 	return sst
 }
 
-func NewSSTManager() (*SSTManager, error) {
+func NewSSTManager(logger *slog.Logger) (*SSTManager, error) {
+	logger.Info("starting SST Manager")
 	// Load ssts here
 	files, err := filepath.Glob(fmt.Sprintf("%s/*%s", baseDir, SSTFileFormat))
 	if err != nil {
 		return nil, err
 	}
 
-	ssts := parseSSTFiles(files)
+	ssts := parseSSTFiles(logger, files)
 
 	sstm := make(map[int]*SSTLevel)
 
@@ -134,8 +137,10 @@ func NewSSTManager() (*SSTManager, error) {
 			return level.ssts[a].ID < level.ssts[b].ID
 		})
 	}
+	logger.Info("found sst files", "count", len(ssts))
 
 	return &SSTManager{
+		logger: logger,
 		levels: sstm,
 	}, nil
 }
@@ -214,14 +219,14 @@ func (m *SSTManager) RemoveSST(
 
 // SST file name format is
 // level_uuid.sst
-func parseSSTFiles(fileNames []string) []*SST {
+func parseSSTFiles(logger *slog.Logger, fileNames []string) []*SST {
 	var res []*SST
 	for _, n := range fileNames {
 
 		// parse sst metadata
 		sst, err := parseSSTMetadata(n)
 		if err != nil {
-			log.Printf("error parsing sst %s : %s\n", n, err)
+			logger.Error("error parsing SST", "file", n, "err", err)
 			continue
 		}
 		sst.FileName = path.Base(n)
@@ -271,11 +276,17 @@ func (s *SSTManager) FlushSST(memtable *Memtable) error {
 	return nil
 }
 
-func (s *SSTManager) GetLevels() int {
+func (s *SSTManager) GetLevels() []int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return len(s.levels)
+	var levels []int
+
+	for level := range s.levels {
+		levels = append(levels, level)
+	}
+
+	return levels
 }
 
 func (s *SSTManager) QueryKey(key string) (*KVData, error) {
@@ -287,7 +298,6 @@ func (s *SSTManager) QueryKey(key string) (*KVData, error) {
 	for _, level := range levels {
 		level.mu.RLock()
 
-		// TODO: SSTs doesn't seem to be sorted in the intended way when flushed
 		for _, sst := range level.ssts {
 			data, err := sst.FindKey(key)
 			if err != nil {
@@ -324,7 +334,7 @@ func (s *SSTManager) StartCleaner(ctx context.Context) {
 			levels := s.levels
 			s.mu.RUnlock()
 
-			for level := range len(levels) {
+			for level := range levels {
 				ssts := s.ListSST(
 					level,
 					[]SSTState{SST_COMPACTED},
@@ -341,7 +351,7 @@ func (s *SSTManager) StartCleaner(ctx context.Context) {
 				for _, sst := range ssts {
 					err := os.Remove(path.Join(baseDir, sst.FileName))
 					if err != nil {
-						log.Print(err)
+						s.logger.Error("error removing file", "file", sst.FileName, "err", err)
 					}
 				}
 			}

@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 )
 
@@ -21,6 +21,8 @@ type KVData struct {
 // Memtables will be implemented with sync.Map to ensure concurrency safety.
 // SSTables will be implemented with SSTables.
 type LSM struct {
+	logger *slog.Logger
+
 	mu sync.RWMutex
 
 	// Memtable is the current active memtable
@@ -34,8 +36,9 @@ type LSM struct {
 	sstManager *SSTManager
 }
 
-func NewLSM(sstManager *SSTManager) *LSM {
+func NewLSM(logger *slog.Logger, sstManager *SSTManager) *LSM {
 	lsm := &LSM{
+		logger:     logger,
 		Memtable:   NewMemtable(),
 		sstManager: sstManager,
 		flushQueue: make(chan *Memtable),
@@ -103,7 +106,7 @@ func (l *LSM) StartFlusher(flushQueue <-chan *Memtable, sstManager *SSTManager) 
 
 			// for now, only print error to log if there is a problem flushing
 			if err := l.sstManager.FlushSST(mt); err != nil {
-				log.Print(err)
+				l.logger.Error("error flushing SST", "err", err)
 			}
 
 			// remove flushed memtable from flushingMemtables

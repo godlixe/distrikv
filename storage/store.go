@@ -1,10 +1,13 @@
 package storage
 
+import "log/slog"
+
 // Store is expected to be
 // a layer of abstraction to the core storage.
 // The core storage will implement LSM, and should be
 // accessed through the interface.
 type Store struct {
+	logger  *slog.Logger
 	Backend *LSM
 }
 
@@ -21,9 +24,10 @@ func (s *Store) Delete(key string) {
 }
 
 func NewStore(
+	logger *slog.Logger,
 	sstManager *SSTManager,
 ) Store {
-	lsmBackend := NewLSM(sstManager)
+	lsmBackend := NewLSM(logger, sstManager)
 
 	return Store{
 		Backend: lsmBackend,

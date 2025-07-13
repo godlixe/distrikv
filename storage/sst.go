@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path"
 	"strings"
@@ -216,20 +215,19 @@ func parseSSTMetadata(filename string) (*SST, error) {
 	if lines[len(lines)-1] != "<sst_done>" {
 		return nil, ErrSSTIncomplete
 	}
-
-	for _, line := range lines {
-		if strings.HasPrefix(line, "level: ") {
-			fmt.Sscanf(line, "level: %d", &level)
-		} else if strings.HasPrefix(line, "timestamp: ") {
+	for i := len(lines) - 2; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], "level: ") {
+			fmt.Sscanf(lines[i], "level: %d", &level)
+		} else if strings.HasPrefix(lines[i], "timestamp: ") {
 			var t string
-			fmt.Sscanf(line, "timestamp: %s", &t)
+			fmt.Sscanf(lines[i], "timestamp: %s", &t)
 			parsed, err := time.Parse(time.RFC3339, t)
 			if err != nil {
-				log.Println("error parsing sst")
+				return nil, err
 			}
 			ts = parsed
-		} else if strings.HasPrefix(line, "id: ") {
-			fmt.Sscanf(line, "id: %d", &id)
+		} else if strings.HasPrefix(lines[i], "id: ") {
+			fmt.Sscanf(lines[i], "id: %d", &id)
 		} else {
 			break
 		}

@@ -14,6 +14,7 @@ func Start(store Store) {
 
 	handler := NewHandler(store)
 	server := gin.Default()
+	gin.SetMode(gin.ReleaseMode)
 
 	Routes(server, handler)
 	server.Run(":" + port)
